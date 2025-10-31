@@ -31,42 +31,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
   cancel-in-progress: true
 
-jobs:
-  build:
-    name: Build ISOs
-    runs-on: ${{ inputs.platform == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
-    strategy:
-      fail-fast: false
-    permissions:
-      contents: read
-      packages: read
-      id-token: write
-
-    steps:
-      - name: lower case the image registry in case of any capitalization
-        run: |
-          echo "IMAGE_REGISTRY=${IMAGE_REGISTRY,,}" >> ${GITHUB_ENV}
-      
-      - name: Install dependencies
-        if: inputs.platform == 'arm64'
-        run: |
-          set -x
-          sudo apt update -y
-          sudo apt install -y \
-            podman
-
-      - name: Maximize build space
-        if: inputs.platform != 'arm64'
-        uses: ublue-os/remove-unwanted-software@cc0becac701cf642c8f0a6613bbdaf5dc36b259e # v9
-        with:
-          remove-codeql: true
-
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
-
-      - name: Setup Just
-        uses: extractions/setup-just@e33e0265a09d6d736e2ee1e0eb685ef1de4669ff # v3
-
       - name: Build ISO
         id: build
         uses: ublue-os/bootc-image-builder-action@main
@@ -101,3 +65,60 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y rclone
           rclone copy $SOURCE_DIR S3:${{ secrets.S3_BUCKET_NAME }}
+
+env:
+  BUILDER_IMAGE: ghcr.io/ublue-os/bootc-image-builder:latest
+  # Choose one of these sets:
+  DISTRO: bluefin
+  RELEASE: "41"
+  # If bluefin 41 still errors later, try:
+  # DISTRO: fedora
+  # RELEASE: "41"
+
+jobs:
+  build_iso:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR (pull your image)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ISO with uBlue bootc-image-builder
+        run: |
+          set -euxo pipefail
+          IMAGE="ghcr.io/${{ github.repository_owner }}/lin-aba:latest"
+          mkdir -p out
+
+          # Pull builder once
+          docker pull "${{ env.BUILDER_IMAGE }}"
+
+          # Generate manifest for ISO (uses distro defs shipped in the uBlue builder)
+          docker run --rm --privileged \
+            -v "$PWD:/work:z" -w /work \
+            "${{ env.BUILDER_IMAGE }}" \
+            manifest \
+            --type iso \
+            --distro "${{ env.DISTRO }}" \
+            --release "${{ env.RELEASE }}" \
+            --image "$IMAGE" \
+            --output manifest-iso.json
+
+          # Build the ISO from the manifest
+          docker run --rm --privileged \
+            -v "$PWD:/work:z" -w /work \
+            "${{ env.BUILDER_IMAGE }}" \
+            build \
+            --manifest manifest-iso.json \
+            --output out
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lin-aba-iso
+          path: out/*.iso
